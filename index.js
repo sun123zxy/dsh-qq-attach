@@ -17,7 +17,7 @@ import { downloadAttachment, sendMediaFile } from './lib/media.js'
 export const name = 'qq-attach'
 
 /** Bumped on every behavioural change; surfaced by the `status` endpoint. */
-const BUILD = '0.8.6-route-auth'
+const BUILD = '0.8.7-watchdog'
 
 export const inject = [
   'agents', 'sessions', 'sessionController', 'storageDomain', 'credentials',
@@ -67,6 +67,10 @@ const createUserMessage = ({ content, source }) => Object.freeze({
 const C2C_TTL = 30 * 60 * 1000
 const GROUP_TTL = 5 * 60 * 1000
 const RECENT_CHATS = 10
+/** Watchdog tick; a gap of three ticks means the process was suspended. */
+const WATCH_MS = 15_000
+/** Ceiling for the retry backoff after a failed start. */
+const RETRY_MAX_MS = 5 * 60_000
 /**
  * Default prompt injected while automatic replies are off. Overridable from the
  * settings panel, so it states the delivery rule rather than a fixed cadence:
@@ -209,6 +213,9 @@ export async function apply(ctx, config = {}) {
   let bot
   let botTask
   let botError
+  /** Retry schedule shared by the start() failure path and the watchdog. */
+  let retryAt = 0
+  let retryDelay = 0
   /** Set by the unload disposer; late work checks it instead of running after unload. */
   let closing = false
   let bindState = { phase: 'idle' }
@@ -255,6 +262,12 @@ export async function apply(ctx, config = {}) {
     } catch { return undefined }
   }
 
+  /** Grow the retry delay after a failure; the watchdog honours `retryAt`. */
+  function backOff() {
+    retryDelay = Math.min(retryDelay === 0 ? WATCH_MS : retryDelay * 2, RETRY_MAX_MS)
+    retryAt = Date.now() + retryDelay
+  }
+
   async function botInstance() {
     if (closing) return undefined
     if (bot) return bot
@@ -293,11 +306,14 @@ export async function apply(ctx, config = {}) {
       // rejects only when the gateway gives up. Do not await it.
       created.start().catch((error) => {
         botError = error instanceof Error ? error.message : String(error)
+        backOff()
         logAll('sys', 'error', `bot stopped: ${botError}`)
         log.warn(`qq-attach: bot stopped: ${botError}`)
         if (bot === created) bot = undefined
       })
       botError = undefined
+      retryDelay = 0
+      retryAt = 0
       bot = created
       return bot
     })()
@@ -308,6 +324,10 @@ export async function apply(ctx, config = {}) {
     const previous = bot
     bot = undefined
     cancelAllStreams()
+    link.connected = false
+    link.disconnectedAt = Date.now()
+    link.reason = 'restarting'
+    logAll('sys', 'link', 'gateway restart')
     if (previous) { try { await previous.stop() } catch {} }
     await botInstance()
   }
@@ -911,6 +931,10 @@ export async function apply(ctx, config = {}) {
         const hasSecret = Boolean(await readSecret())
         return { build: BUILD, bound: Boolean(saved?.appId), appId: saved?.appId, running: Boolean(bot), hasSecret, error: botError ?? null, link: { ...link } }
       }
+      case 'bot.restart': {
+        await restartBot()
+        return { restarted: true }
+      }
       case 'bind.start': return startBind()
       case 'bind.state': return bindState
       case 'bind.cancel': stopBind?.(); stopBind = undefined; bindState = { phase: 'idle' }; return bindState
@@ -1068,6 +1092,32 @@ export async function apply(ctx, config = {}) {
       return () => clearInterval(timer)
     }, 'qq-attach: media cleanup')
   }
+
+  // ---- watchdog ---------------------------------------------------------
+
+  // A suspended laptop freezes timers without closing the socket, so a resume is
+  // visible only as a tick that arrives far too late. Start a fresh connection
+  // then, and retry a bot whose start() gave up.
+
+  let lastTick = Date.now()
+
+  ctx.effect(() => {
+    const timer = setInterval(() => {
+      const now = Date.now()
+      if (now - lastTick > WATCH_MS * 3) {
+        lastTick = now
+        logAll('sys', 'link', 'resumed from suspend; restarting the gateway')
+        void restartBot().catch(() => {})
+        return
+      }
+      lastTick = now
+      if (bot || botTask) return
+      if (!account.get('main')?.appId) return
+      if (now < retryAt) return
+      void botInstance().catch(backOff)
+    }, WATCH_MS)
+    return () => clearInterval(timer)
+  }, 'qq-attach: watchdog')
 
   ctx.effect(() => () => {
     closing = true

@@ -37,6 +37,15 @@ window.__ModuleLoader__.load({
       bound: 'Attached to',
       none: 'No QQ chat attached',
       account: 'QQ bot',
+      link: 'Connection',
+      linkUnbound: 'No bot bound',
+      linkConnected: 'Connected',
+      linkOffline: 'Disconnected',
+      linkFailed: 'Connection problem',
+      linkDownSince: 'Down since',
+      linkUpSince: 'Connected since',
+      reconnect: 'Reconnect',
+      reconnecting: 'Reconnecting…',
       appId: 'AppID',
       appSecret: 'AppSecret',
       save: 'Save',
@@ -88,6 +97,15 @@ window.__ModuleLoader__.load({
       bound: '当前绑定',
       none: '尚未绑定 QQ 聊天',
       account: 'QQ 机器人',
+      link: '连接状态',
+      linkUnbound: '未绑定机器人',
+      linkConnected: '已连接',
+      linkOffline: '已断开',
+      linkFailed: '连接异常',
+      linkDownSince: '断开于',
+      linkUpSince: '连接于',
+      reconnect: '重连',
+      reconnecting: '重连中…',
       appId: 'AppID',
       appSecret: 'AppSecret',
       save: '保存',
@@ -452,6 +470,7 @@ window.__ModuleLoader__.load({
       const [appId, setAppId] = useState('')
       const [appSecret, setAppSecret] = useState('')
       const [error, setError] = useState(null)
+      const [restarting, setRestarting] = useState(false)
 
       const refresh = useCallback(async () => {
         const [nextStatus, attaches] = await Promise.all([call('status'), call('attach.list')])
@@ -499,6 +518,22 @@ window.__ModuleLoader__.load({
         catch (err) { setError(err.message) }
       }
 
+      const reconnect = async () => {
+        setError(null)
+        setRestarting(true)
+        try { await call('bot.restart'); await refresh() }
+        catch (err) { setError(err.message) }
+        finally { setRestarting(false) }
+      }
+
+      // While the bot is down, poll so the badge and the reconnect result settle
+      // without the user reopening the page.
+      useEffect(() => {
+        if (!status?.bound || (status.running && status.link?.connected)) return
+        const timer = setInterval(() => { call('status').then(setStatus).catch(() => {}) }, 2000)
+        return () => clearInterval(timer)
+      }, [status?.bound, status?.running, status?.link?.connected])
+
       const account = h('div', { style: styles.card },
         h('div', { style: { fontWeight: 600 } }, t('account')),
         status?.bound
@@ -527,6 +562,55 @@ window.__ModuleLoader__.load({
               bind.phase === 'saving' ? h('div', { style: styles.muted }, '…') : null),
         error ? h('div', { style: styles.error }, error) : null)
 
+      const link = status?.link
+      const online = Boolean(status?.running && link?.connected)
+      const linkState = !status?.bound
+        ? t('linkUnbound')
+        : status.error
+          ? `${t('linkFailed')}: ${status.error}`
+          : online
+            ? t('linkConnected')
+            : t('linkOffline')
+      const linkColor = !status?.bound
+        ? 'var(--dsw-alias-state-idle-primary)'
+        : status.error
+          ? 'var(--dsw-alias-state-error-primary)'
+          : online
+            ? 'var(--dsw-alias-state-success-primary)'
+            : 'var(--dsw-alias-state-warn-primary)'
+      // One dot carries the state; the label and hover text explain it.
+      const linkDot = h('span', {
+        'aria-hidden': true,
+        title: status?.error ?? link?.reason ?? linkState,
+        style: {
+          flex: 'none',
+          width: '8px',
+          height: '8px',
+          borderRadius: '50%',
+          background: linkColor,
+        },
+      })
+
+      const connection = h('div', { style: styles.card },
+        h('div', { style: { fontWeight: 600 } }, t('link')),
+        h('div', { style: styles.row },
+          linkDot,
+          h('span', { style: styles.label }, linkState),
+          status?.bound
+            ? h('button', {
+                style: styles.button,
+                disabled: restarting,
+                onClick: reconnect,
+              }, restarting ? t('reconnecting') : t('reconnect'))
+            : null),
+        status?.bound && link?.connected === true && link.readyAt > 0
+          ? h('div', { style: styles.muted }, `${t('linkUpSince')} ${new Date(link.readyAt).toLocaleTimeString()}`)
+          : null,
+        status?.bound && link?.connected === false && link.disconnectedAt > 0
+          ? h('div', { style: styles.muted },
+              `${t('linkDownSince')} ${new Date(link.disconnectedAt).toLocaleTimeString()}${link.reason ? ` · ${link.reason}` : ''}`)
+          : null)
+
       const attaches = h('div', { style: styles.card },
         h('div', { style: { fontWeight: 600 } }, t('nav')),
         list.length === 0
@@ -550,7 +634,7 @@ window.__ModuleLoader__.load({
                 h('span', { style: styles.muted }, disabled ? t('archived') : t('open')))
             }))
 
-      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '8px', padding: '8px 0' } }, account, attaches)
+      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '8px', padding: '8px 0' } }, account, connection, attaches)
     }
 
     return {
