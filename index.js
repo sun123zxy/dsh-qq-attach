@@ -17,7 +17,7 @@ import { downloadAttachment, sendMediaFile } from './lib/media.js'
 export const name = 'qq-attach'
 
 /** Bumped on every behavioural change; surfaced by the `status` endpoint. */
-const BUILD = '0.8.3-archived-disabled'
+const BUILD = '0.8.4-credential-key'
 
 export const inject = [
   'agents', 'sessions', 'sessionController', 'storageDomain', 'credentials',
@@ -242,9 +242,12 @@ export async function apply(ctx, config = {}) {
 
   // ---- credentials and bot lifecycle -------------------------------------
 
+  /** DSH credential record keys must follow `<scope>/<id>`. */
+  const CREDENTIAL_KEY = 'qq-attach/main'
+
   async function readSecret() {
     try {
-      const record = await ctx.credentials.readRecord('qq-attach')
+      const record = await ctx.credentials.readRecord(CREDENTIAL_KEY)
       return record && record.kind === 'api-key' ? record.key : undefined
     } catch { return undefined }
   }
@@ -839,7 +842,7 @@ export async function apply(ctx, config = {}) {
 
   async function applyCredentials(appId, appSecret) {
     if (!appId || !appSecret) throw new Error('AppID and AppSecret are required')
-    await ctx.credentials.modifyRecord('qq-attach', async () => ({ kind: 'api-key', key: appSecret }))
+    await ctx.credentials.modifyRecord(CREDENTIAL_KEY, async () => ({ kind: 'api-key', key: appSecret }))
     await account.put('main', { appId, updatedAt: Date.now() })
     await restartBot()
   }
@@ -909,7 +912,7 @@ export async function apply(ctx, config = {}) {
       case 'account.clear': {
         stopBind?.(); stopBind = undefined
         await account.delete('main')
-        await ctx.credentials.deleteRecord('qq-attach')
+        await ctx.credentials.deleteRecord(CREDENTIAL_KEY)
         await restartBot()
         bindState = { phase: 'idle' }
         logAll('sys', 'account', 'credentials cleared')
