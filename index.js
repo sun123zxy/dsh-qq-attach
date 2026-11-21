@@ -17,11 +17,11 @@ import { downloadAttachment, sendMediaFile } from './lib/media.js'
 export const name = 'qq-attach'
 
 /** Bumped on every behavioural change; surfaced by the `status` endpoint. */
-const BUILD = '0.8.4-credential-key'
+const BUILD = '0.8.6-route-auth'
 
 export const inject = [
   'agents', 'sessions', 'sessionController', 'storageDomain', 'credentials',
-  'webServer', 'systemPrompt', 'tools', 'sessionQuery', 'attachments', 'workspaceRegistry',
+  'webServer', 'connection', 'systemPrompt', 'tools', 'sessionQuery', 'attachments', 'workspaceRegistry',
 ]
 
 const Attach = z.object({
@@ -1025,6 +1025,9 @@ export async function apply(ctx, config = {}) {
     kind: 'prefix',
     path: '/qq-attach',
     handler: async (req, res) => {
+      // A webserver route authenticates nothing; /api applies this same check.
+      const rejection = ctx.connection.requestRejection(req)
+      if (rejection !== undefined) { res.writeHead(rejection); res.end(); return }
       if (req.method !== 'POST') { res.writeHead(405); res.end(); return }
       const pathname = new URL(req.url ?? '/', 'http://localhost').pathname
       const endpoint = pathname.startsWith('/qq-attach/') ? pathname.slice('/qq-attach/'.length) : ''
