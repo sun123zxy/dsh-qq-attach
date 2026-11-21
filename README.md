@@ -34,7 +34,7 @@ group and direct-message events enabled, and its AppID and AppSecret.
 Paste one of these into **Settings → Plugins → add plugin**:
 
 ```
-github:<owner>/<repo>
+github:sun123zxy/dsh-qq-attach
 ```
 
 Doing development instead? Clone the repository and
