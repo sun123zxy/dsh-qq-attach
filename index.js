@@ -83,7 +83,8 @@ const DEFAULT_PROMPT = 'This DSH session is attached to one QQ chat, and automat
 export async function apply(ctx, config = {}) {
   const log = ctx.logger ?? console
   const domain = await ctx.storageDomain.open(SPEC)
-  ctx.effect(() => () => { void domain.close() }, 'qq-attach: close domain')
+  // Return the promise: Cordis waits for a disposer before unload finishes.
+  ctx.effect(() => () => domain.close(), 'qq-attach: close domain')
 
   const attaches = domain.table('attaches')
   const chats = domain.table('chats')
@@ -208,6 +209,8 @@ export async function apply(ctx, config = {}) {
   let bot
   let botTask
   let botError
+  /** Set by the unload disposer; late work checks it instead of running after unload. */
+  let closing = false
   let bindState = { phase: 'idle' }
   let stopBind
   const requireQr = createRequire(import.meta.url)
@@ -236,7 +239,7 @@ export async function apply(ctx, config = {}) {
   }
   async function sendText(target, text) {
     const b = await botInstance()
-    if (!b) throw new Error('QQ bot is not configured')
+    if (!b) throw new Error(closing ? 'the QQ attach plugin is unloading' : 'QQ bot is not configured')
     for (const chunk of chunkText(text)) await b.sendMarkdown(passive(target), chunk)
   }
 
@@ -253,13 +256,15 @@ export async function apply(ctx, config = {}) {
   }
 
   async function botInstance() {
+    if (closing) return undefined
     if (bot) return bot
     if (botTask) return botTask
     botTask = (async () => {
       const saved = account.get('main')
       if (!saved?.appId) return undefined
       const secret = await readSecret()
-      if (!secret) return undefined
+      // Last await before the bot is built, so a bot created here gets published.
+      if (!secret || closing) return undefined
       const created = new QQBot({ appId: saved.appId, appSecret: secret, logger: log })
       // Buffer first so skipped messages are still recorded, then resolve quotes,
       // then let the SDK decide whether this message addresses the bot. passthrough
@@ -377,7 +382,7 @@ export async function apply(ctx, config = {}) {
       const allowed = (cwd && isWithinRoot(path, cwd)) || isWithinRoot(path, MEDIA_ROOT)
       if (!allowed) throw new Error('path is outside the session working directory and the QQ media directory')
       const b = await botInstance()
-      if (!b) throw new Error('QQ bot is not configured')
+      if (!b) throw new Error(closing ? 'the QQ attach plugin is unloading' : 'QQ bot is not configured')
       const result = await sendMediaFile(b, passive(att.target), path)
       if (result.outcome === 'missing') {
         logLine(att.sessionId, 'out', 'qq_send_file', `missing: ${path}`)
@@ -426,6 +431,8 @@ export async function apply(ctx, config = {}) {
   }
 
   function ensureRuntime(agent) {
+    // Late work must not re-register tools the disposer already unwound.
+    if (closing) return undefined
     let runtime = runtimes.get(agent.id)
     if (!runtime) {
       runtime = {}
@@ -539,6 +546,8 @@ export async function apply(ctx, config = {}) {
       if (context.blocks.length > 0) content.splice(Math.min(1, content.length), 0, ...context.blocks)
       if (content.length === 0) return
       const message = createUserMessage({ content, source: { kind: 'user' } })
+      // Downloads above can outlive the plugin: don't seed a detached session.
+      if (closing) return
       if (att.steer) agent.steer(message)
       else agent.followup(message)
       try { await ctx.sessions.flush?.(agent.session) } catch {}
@@ -848,6 +857,7 @@ export async function apply(ctx, config = {}) {
   }
 
   function startBind() {
+    if (closing) return bindState
     if (bindState.phase === 'waiting' || bindState.phase === 'starting') return bindState
     stopBind?.()
     bindState = { phase: 'starting' }
@@ -1001,6 +1011,7 @@ export async function apply(ctx, config = {}) {
         const att = bySession.get(sessionId)
         if (!att) return { removed: false }
         await attaches.delete(att.target)
+        cancelStream(att.target)
         disposeRuntime(sessionId)
         rebuild()
         logLine(sessionId, 'sys', 'attach', `detached from ${att.target}`)
@@ -1056,10 +1067,14 @@ export async function apply(ctx, config = {}) {
   }
 
   ctx.effect(() => () => {
+    closing = true
     for (const sessionId of [...runtimes.keys()]) disposeRuntime(sessionId)
     stopBind?.()
     cancelAllStreams()
-    void bot?.stop()
+    bot?.stop()
+    bot = undefined
+    // Let a pending botInstance() settle; it sees closing and builds nothing.
+    return botTask?.catch(() => {})
   }, 'qq-attach: stop bot')
 
   for (const att of bySession.values()) {
